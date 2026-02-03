@@ -1,4 +1,7 @@
 HELP.md
+day1.txt
+day1.utf8.txt
+简历.docx
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
