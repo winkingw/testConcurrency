@@ -40,4 +40,15 @@ public class ProductController {
     public Result deleteProduct(@PathVariable @NotNull @Min(1) Long id) {
         return Result.success(productService.deleteProduct(id));
     }
+
+    @PostMapping("/{id}/deduct")
+    public Result deductProduct(@PathVariable @NotNull @Min(1) Long id
+                                ,@RequestParam @NotNull @Min(1) Integer count) {
+        return Result.success(productService.deductStock(id,count));
+    }
+
+    @PostMapping("/{id}/preheat")
+    public Result preheatProduct(@PathVariable @NotNull @Min(1) Long id) {
+        return Result.success(productService.preheatStock(id));
+    }
 }

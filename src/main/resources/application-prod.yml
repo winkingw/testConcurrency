@@ -36,6 +36,7 @@ mybatis:
 
 app:
   cache:
-    enabled: false
+    enabled: true
   stock:
-    async: false
+    async:
+      enabled: true

@@ -1,18 +1,26 @@
 package com.utgaming.testconcurrency.service.impl;
 
 import com.utgaming.testconcurrency.common.BusinessException;
+import com.utgaming.testconcurrency.common.CacheData;
 import com.utgaming.testconcurrency.controller.dto.ProductCreateRequest;
 import com.utgaming.testconcurrency.controller.dto.ProductUpdateRequest;
 import com.utgaming.testconcurrency.entity.Product;
 import com.utgaming.testconcurrency.mapper.ProductMapper;
 import com.utgaming.testconcurrency.service.ProductService;
+import com.utgaming.testconcurrency.service.StockAsyncService;
 import com.utgaming.testconcurrency.util.RedisUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+
 
 @Service
 public class ProductServiceImpl implements ProductService {
@@ -20,45 +28,155 @@ public class ProductServiceImpl implements ProductService {
     private final RedisUtil redisUtil;
     private final ObjectMapper objectMapper;
     private final boolean cacheEnabled;
+
     private static final long TTL_SECONDS = 1800;
+    private static final long TTL_JITTER_SECONDS = 300;
+
+    private final StringRedisTemplate stringRedisTemplate;
+    private final DefaultRedisScript<Long> deductStockScript;
+    private final StockAsyncService stockAsyncService;
+    @Value("${app.stock.async.enabled:false}") boolean asyncEnabled;
 
     public ProductServiceImpl(
             ProductMapper productMapper,
             RedisUtil redisUtil,
             ObjectMapper objectMapper,
-            @Value("${app.cache.enabled:true}") boolean cacheEnabled
-    ) {
+            @Value("${app.cache.enabled:true}") boolean cacheEnabled,
+            StringRedisTemplate stringRedisTemplate,
+            DefaultRedisScript<Long> deductStockScript,
+            StockAsyncService stockAsyncService) {
         this.productMapper = productMapper;
         this.redisUtil = redisUtil;
         this.objectMapper = objectMapper;
         this.cacheEnabled = cacheEnabled;
+        this.stringRedisTemplate = stringRedisTemplate;
+        this.deductStockScript = deductStockScript;
+        this.stockAsyncService = stockAsyncService;
     }
 
     @Override
     @Transactional(readOnly = true)
     public Product getProductById(Long id) {
         String key = "product:" + id;
+
         if (!cacheEnabled) {
             return productMapper.selectById(id);
         }
-        Object cache = redisUtil.get(key);
+
+          Object cache = redisUtil.get(key);
 
         if (cache != null) {
             if (RedisUtil.NULL_PLACEHOLDER.equals(cache)) return null;
-            if (cache instanceof Product) return (Product) cache;
-            return objectMapper.convertValue(cache, Product.class);
+           /* if (cache instanceof Product) return (Product) cache;
+            return objectMapper.convertValue(cache, Product.class);*/
+
+            CacheData cacheData = objectMapper.convertValue(cache, CacheData.class);
+            Object data = cacheData.getData();
+            LocalDateTime expireTime = cacheData.getExpireTime();
+
+            Product product = objectMapper.convertValue(data, Product.class);
+
+            if(expireTime != null && expireTime.isAfter(LocalDateTime.now())) {
+                return product;
+            }
+
+            if(expireTime == null) {
+                return product;
+            }
+
+/*            if (expireTime.isBefore(LocalDateTime.now())) {
+                CacheData newData = new CacheData();
+                newData.setData(productMapper.selectById(id));
+                newData.setExpireTime(LocalDateTime.now().plusSeconds(TTL_SECONDS));
+                long ttl = TTL_SECONDS + ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS + 1);
+                redisUtil.set(key, newData, ttl);
+            }*/
+
+            /*添加互斥锁防止多次访问db*/
+            if(expireTime.isBefore(LocalDateTime.now())) {
+                String rebuildKey = "lock:rebuild:product:" + id;
+                Boolean rebuildLock = stringRedisTemplate.opsForValue()
+                        .setIfAbsent(rebuildKey, "1", 3, TimeUnit.SECONDS);
+
+                if (Boolean.TRUE.equals(rebuildLock)) {
+                    try {
+                        Product fresh = productMapper.selectById(id);
+                        if(fresh == null) {
+                            redisUtil.set(key, RedisUtil.NULL_PLACEHOLDER, 30);
+                        }else{
+                            CacheData newData = new CacheData();
+                            newData.setData(fresh);
+                            newData.setExpireTime(LocalDateTime.now().plusSeconds(TTL_SECONDS));
+                            redisUtil.set(key, newData
+                                    , TTL_SECONDS +
+                                            ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS + 1));
+                        }
+                    }finally {
+                        stringRedisTemplate.delete(rebuildKey);
+                    }
+                }
+            }
+
+            return product;
         }
 
-        Product db = productMapper.selectById(id);
+        String lockKey = "lock:product:" + id;
+        Boolean locked = stringRedisTemplate.opsForValue()
+                .setIfAbsent(lockKey, "1",3, TimeUnit.SECONDS);
+
+        if (Boolean.TRUE.equals(locked)) {
+            try {
+                Product db = productMapper.selectById(id);
+                if(db == null){
+                    redisUtil.set(key, RedisUtil.NULL_PLACEHOLDER, 30);
+                    return null;
+                }
+
+                long ttl = TTL_SECONDS + ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS + 1);
+
+                /*redisUtil.set(key, db, ttl);*/
+                /*
+                    添加缓存过期
+                */
+                CacheData cacheData = new CacheData();
+                cacheData.setData(db);
+                cacheData.setExpireTime(LocalDateTime.now().plusSeconds(TTL_SECONDS));
+                redisUtil.set(key, cacheData, ttl);
+
+                return db;
+            }finally {
+                stringRedisTemplate.delete(lockKey);
+            }
+        }else{
+            try {
+                Thread.sleep(80);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            Object retry = redisUtil.get(key);
+
+            if (retry != null) {
+                if(RedisUtil.NULL_PLACEHOLDER.equals(retry)) return null;
+                if (retry instanceof Product) return (Product) retry;
+                return objectMapper.convertValue(retry, Product.class);
+            }
+
+            return null;
+        }
+
+/*        Product db = productMapper.selectById(id);
 
         if (db == null) {
             redisUtil.set(key, RedisUtil.NULL_PLACEHOLDER,30);
             return null;
         }
 
-        redisUtil.set(key, db, TTL_SECONDS);
+        long ttl = TTL_SECONDS + ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS + 1);
 
-        return db;
+        redisUtil.set(key, db, ttl);
+
+        return db;*/
     }
 
     @Override
@@ -81,6 +199,9 @@ public class ProductServiceImpl implements ProductService {
             redisUtil.del(key);
         }
 
+        stringRedisTemplate.opsForValue()
+                .set("stock:"+product.getId(),String.valueOf(product.getStock()));
+
         return product;
     }
 
@@ -94,7 +215,10 @@ public class ProductServiceImpl implements ProductService {
         if(request.getName()!=null) p.setName(request.getName());
         if(request.getPrice()!=null) p.setPrice(request.getPrice());
         if(request.getCategoryId()!=null) p.setCategoryId(request.getCategoryId());
-        if(request.getStock()!=null) p.setStock(request.getStock());
+        if(request.getStock()!=null) {
+            p.setStock(request.getStock());
+            stringRedisTemplate.opsForValue().set("stock:"+ id,String.valueOf(request.getStock()));
+        }
 
         p.setUpdatedAt(LocalDateTime.now());
 
@@ -130,5 +254,59 @@ public class ProductServiceImpl implements ProductService {
         }
 
         return p;
+    }
+
+    @Transactional
+    public boolean deductStock(Long id,int count) {
+        String key = "stock:" + id;
+        Long r = stringRedisTemplate.execute(deductStockScript,
+                Collections.singletonList(key),
+                String.valueOf(count));
+        if(r == null || r == -1){
+
+            throw new BusinessException(500,"库存没预热");
+        }
+
+        if(r == 0){
+            throw new BusinessException(409,"库存不足");
+        }
+
+        if(asyncEnabled){
+            stockAsyncService.writeBackAsync(id,count);
+        }else{
+/*            int rows = productMapper.deductStock(id, count);
+
+            if (rows != 1) {
+                stringRedisTemplate.opsForValue().increment(key, count);
+                throw new BusinessException(500,"库存回写失败");
+            }*/
+            //调用的mapper中deduct，改乐观锁后要用mp中update
+
+            Product p = productMapper.selectById(id);
+            if(p == null){
+                throw new BusinessException(404,"商品不存在");
+            }
+            if(p.getStock() < count) throw new BusinessException(409,"库存不足");
+
+            p.setStock(p.getStock() - count);
+            int rows = productMapper.updateById(p); // 乐观锁生效
+            if (rows != 1) {
+                throw new BusinessException(409, "并发冲突，请重试");
+            }
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean preheatStock(Long id) {
+        Product p = productMapper.selectById(id);
+
+        if(p == null){
+            throw new BusinessException(404,"找不到该商品");
+        }
+
+        stringRedisTemplate.opsForValue().set("stock:"+ id,String.valueOf(p.getStock()));
+        return true;
     }
 }

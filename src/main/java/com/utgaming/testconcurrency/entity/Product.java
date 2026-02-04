@@ -4,6 +4,7 @@ package com.utgaming.testconcurrency.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.Version;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -24,4 +25,7 @@ public class Product {
     private Integer categoryId;
 
     private LocalDateTime updatedAt;
+
+    @Version
+    private Integer version;
 }
