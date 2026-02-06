@@ -25,36 +25,9 @@ server:
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://mysql:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://proxysql:6033/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
     username: root
     password: 242859
-  shardingsphere:
-    database-name: testConcurrency
-    datasource:
-      names: master,slave
-      master:
-        type: com.zaxxer.hikari.HikariDataSource
-        driver-class-name: com.mysql.cj.jdbc.Driver
-        jdbc-url: jdbc:mysql://mysql:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&useInformationSchema=true&nullCatalogMeansCurrent=true
-        username: root
-        password: 242859
-      slave:
-        type: com.zaxxer.hikari.HikariDataSource
-        driver-class-name: com.mysql.cj.jdbc.Driver
-        jdbc-url: jdbc:mysql://mysql-slave:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&useInformationSchema=true&nullCatalogMeansCurrent=true
-        username: root
-        password: 242859
-    rules:
-      readwrite-splitting:
-        data-sources:
-          rw_ds:
-            type: Static
-            props:
-              write-data-source-name: master
-              read-data-source-names: slave
-    props:
-      sql-show: true
-      check-table-metadata-enabled: false
   data:
     # redis配置
     redis:
