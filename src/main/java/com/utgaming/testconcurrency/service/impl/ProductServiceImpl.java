@@ -10,6 +10,8 @@ import com.utgaming.testconcurrency.service.ProductService;
 import com.utgaming.testconcurrency.service.StockAsyncService;
 import com.utgaming.testconcurrency.util.RedisUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Counter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -18,6 +20,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +41,12 @@ public class ProductServiceImpl implements ProductService {
     private final StockAsyncService stockAsyncService;
     @Value("${app.stock.async.enabled:false}") boolean asyncEnabled;
 
+    private final Counter cacheHit;
+    private final Counter cacheMiss;
+    private final Counter deductSuccess;
+    private final Counter deductFail;
+    private final Counter dbWriteFail;
+
     public ProductServiceImpl(
             ProductMapper productMapper,
             RedisUtil redisUtil,
@@ -44,7 +54,8 @@ public class ProductServiceImpl implements ProductService {
             @Value("${app.cache.enabled:true}") boolean cacheEnabled,
             StringRedisTemplate stringRedisTemplate,
             DefaultRedisScript<Long> deductStockScript,
-            StockAsyncService stockAsyncService) {
+            StockAsyncService stockAsyncService,
+            MeterRegistry meterRegistry) {
         this.productMapper = productMapper;
         this.redisUtil = redisUtil;
         this.objectMapper = objectMapper;
@@ -52,7 +63,23 @@ public class ProductServiceImpl implements ProductService {
         this.stringRedisTemplate = stringRedisTemplate;
         this.deductStockScript = deductStockScript;
         this.stockAsyncService = stockAsyncService;
+        this.cacheHit = meterRegistry.counter("cache.hit");
+        this.cacheMiss = meterRegistry.counter("cache.miss");
+        this.deductSuccess = meterRegistry.counter("stock.deduct.success");
+        this.deductFail = meterRegistry.counter("stock.deduct.fail");
+        this.dbWriteFail = meterRegistry.counter("db.write.fail");
     }
+
+    /*延迟双删所需代码段*/
+    private final static long CACHE_DELAY_DELETE_MS = 300;
+    private final ScheduledExecutorService cacheDeleteExecutor =
+            Executors.newSingleThreadScheduledExecutor();
+
+    private void delayDelete(String key) {
+        cacheDeleteExecutor.schedule(() -> redisUtil.del(key),
+                CACHE_DELAY_DELETE_MS,TimeUnit.MILLISECONDS);
+    }
+    /*延迟双删所需代码段*/
 
     @Override
     @Transactional(readOnly = true)
@@ -75,6 +102,8 @@ public class ProductServiceImpl implements ProductService {
             LocalDateTime expireTime = cacheData.getExpireTime();
 
             Product product = objectMapper.convertValue(data, Product.class);
+
+            cacheHit.increment();//hit
 
             if(expireTime != null && expireTime.isAfter(LocalDateTime.now())) {
                 return product;
@@ -116,9 +145,10 @@ public class ProductServiceImpl implements ProductService {
                     }
                 }
             }
-
             return product;
         }
+
+        if(cache == null) cacheMiss.increment();//hit
 
         String lockKey = "lock:product:" + id;
         Boolean locked = stringRedisTemplate.opsForValue()
@@ -127,6 +157,7 @@ public class ProductServiceImpl implements ProductService {
         if (Boolean.TRUE.equals(locked)) {
             try {
                 Product db = productMapper.selectById(id);
+
                 if(db == null){
                     redisUtil.set(key, RedisUtil.NULL_PLACEHOLDER, 30);
                     return null;
@@ -191,12 +222,14 @@ public class ProductServiceImpl implements ProductService {
 
         int rows = productMapper.insert(product);
         if (rows != 1) {
+            dbWriteFail.increment();
             throw new BusinessException(500,"创建失败");
         }
 
         if(cacheEnabled){
             String key = "product:" + product.getId();
             redisUtil.del(key);
+            delayDelete(key);
         }
 
         stringRedisTemplate.opsForValue()
@@ -225,12 +258,14 @@ public class ProductServiceImpl implements ProductService {
         int rows = productMapper.updateById(p);
 
         if (rows != 1) {
+            dbWriteFail.increment();
             throw new BusinessException(500,"更新失败");
         }
 
         if(cacheEnabled){
             String key = "product:" + p.getId();
             redisUtil.del(key);
+            delayDelete(key);
         }
 
         return p;
@@ -245,12 +280,15 @@ public class ProductServiceImpl implements ProductService {
 
         int rows = productMapper.deleteById(id);
         if (rows != 1) {
+            dbWriteFail.increment();
             throw new BusinessException(500, "删除失败");
         }
 
         if(cacheEnabled){
             String key = "product:" + p.getId();
             redisUtil.del(key);
+            delayDelete(key);
+            redisUtil.del("stock:"+ id);
         }
 
         return p;
@@ -259,15 +297,18 @@ public class ProductServiceImpl implements ProductService {
     @Transactional
     public boolean deductStock(Long id,int count) {
         String key = "stock:" + id;
+
         Long r = stringRedisTemplate.execute(deductStockScript,
                 Collections.singletonList(key),
                 String.valueOf(count));
-        if(r == null || r == -1){
 
+        if(r == null || r == -1){
+            deductFail.increment();
             throw new BusinessException(500,"库存没预热");
         }
 
         if(r == 0){
+            deductFail.increment();
             throw new BusinessException(409,"库存不足");
         }
 
@@ -284,15 +325,23 @@ public class ProductServiceImpl implements ProductService {
 
             Product p = productMapper.selectById(id);
             if(p == null){
+                deductFail.increment();
                 throw new BusinessException(404,"商品不存在");
             }
-            if(p.getStock() < count) throw new BusinessException(409,"库存不足");
+            if(p.getStock() < count) {
+                deductFail.increment();
+                throw new BusinessException(409,"库存不足");
+            }
 
             p.setStock(p.getStock() - count);
+
             int rows = productMapper.updateById(p); // 乐观锁生效
             if (rows != 1) {
+                stringRedisTemplate.opsForValue().increment(key, count);
+                deductFail.increment();
                 throw new BusinessException(409, "并发冲突，请重试");
             }
+            deductSuccess.increment();
         }
 
         return true;
@@ -306,7 +355,12 @@ public class ProductServiceImpl implements ProductService {
             throw new BusinessException(404,"找不到该商品");
         }
 
+        if(!cacheEnabled){
+            throw new BusinessException(500,"未设定启动redis模块");
+        }
+
         stringRedisTemplate.opsForValue().set("stock:"+ id,String.valueOf(p.getStock()));
         return true;
     }
+
 }

@@ -6,6 +6,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 
 
 @Slf4j
@@ -13,11 +15,20 @@ import org.springframework.stereotype.Service;
 public class StockAsyncService {
     private final ProductMapper productMapper;
     private final StringRedisTemplate stringRedisTemplate;
+    private final Counter asyncSuccess;
+    private final Counter asyncFail;
+    private final Counter asyncRetry;
+    private final Counter asyncRollback;
 
     public StockAsyncService(ProductMapper productMapper,
-                             StringRedisTemplate stringRedisTemplate) {
+                             StringRedisTemplate stringRedisTemplate,
+                             MeterRegistry meterRegistry) {
         this.productMapper = productMapper;
         this.stringRedisTemplate = stringRedisTemplate;
+        this.asyncSuccess = meterRegistry.counter("stock.async.success");
+        this.asyncFail = meterRegistry.counter("stock.async.fail");
+        this.asyncRetry = meterRegistry.counter("stock.async.retry");
+        this.asyncRollback = meterRegistry.counter("stock.async.rollback");
     }
 
     @Async
@@ -31,12 +42,16 @@ public class StockAsyncService {
 
             Product p = productMapper.selectById(id);
 
+            if(i > 0) asyncRetry.increment();
+
             if(p == null){
+                asyncFail.increment();
                 log.warn("异步回写失败，未找到对应商品 id={}, count={}", id, count);
                 return;
             }
 
             if(p.getStock() < count){
+                asyncFail.increment();
                 log.warn("异步回写失败，商品数量不足 id={}, count={}", id, count);
                 return;
             }
@@ -44,6 +59,7 @@ public class StockAsyncService {
             p.setStock(p.getStock()-count);
             int rows = productMapper.updateById(p);
             if(rows == 1){
+                asyncSuccess.increment();
                 log.info("异步回写成功 id={}, count={}", id, count);
                 return;
             }
@@ -59,5 +75,7 @@ public class StockAsyncService {
 
         stringRedisTemplate.opsForValue().increment("stock:"+ id,count);
         log.warn("异步回写失败，回滚redis库存量,id={},count={}", id, count);
+        asyncFail.increment();
+        asyncRollback.increment();
     }
 }

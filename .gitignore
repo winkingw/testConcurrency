@@ -1,8 +1,5 @@
 HELP.md
-day1.txt
-day1.utf8.txt
-day2.txt
-day2.utf8.txt
+*.txt
 简历.docx
 target/
 .mvn/wrapper/maven-wrapper.jar

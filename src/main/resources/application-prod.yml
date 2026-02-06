@@ -1,3 +1,23 @@
+resilience4j:
+  ratelimiter:
+    instances:
+      deductLimiter:
+        limitForPeriod: 200
+        limitRefreshPeriod: 1s
+        timeoutDuration: 0
+  circuitbreaker:
+    instances:
+      deductBreaker:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 50
+        minimumNumberOfCalls: 20
+        failureRateThreshold: 10
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 5
+        recordExceptions:
+          - java.lang.Exception
+        ignoreExceptions:
+          - com.utgaming.testconcurrency.common.BusinessException
 server:
   servlet:
     context-path: /api
@@ -5,7 +25,7 @@ server:
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://localhost:3307/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
     username: root
     password: 242859
   data:
@@ -31,8 +51,22 @@ spring:
           max-idle: 10
           # 连接池中的最小空闲连接
           min-idle: 0
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: stock-writeback-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.utgaming.testconcurrency.common"
+        spring.json.value.default.type: com.utgaming.testconcurrency.common.StockDeductMessage
 mybatis:
   mapper-locations: classpath:mapper/*.xml
+
 
 app:
   cache:
@@ -40,3 +74,8 @@ app:
   stock:
     async:
       enabled: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
