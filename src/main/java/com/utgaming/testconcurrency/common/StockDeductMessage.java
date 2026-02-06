@@ -10,7 +10,7 @@ public class StockDeductMessage {
 
     int count;
 
-    long requestId;
+    String requestId;
 
     LocalDateTime timestamp;
 }

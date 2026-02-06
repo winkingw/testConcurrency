@@ -64,6 +64,10 @@ spring:
       properties:
         spring.json.trusted.packages: "com.utgaming.testconcurrency.common"
         spring.json.value.default.type: com.utgaming.testconcurrency.common.StockDeductMessage
+#logging:
+#  level:
+#    org.springframework.kafka: DEBUG
+#    org.apache.kafka: INFO
 mybatis:
   mapper-locations: classpath:mapper/*.xml
 
@@ -73,6 +77,8 @@ app:
     enabled: true
   stock:
     async:
+      enabled: false
+    kafka:
       enabled: true
 management:
   endpoints:

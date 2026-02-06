@@ -2,6 +2,7 @@ package com.utgaming.testconcurrency.service.impl;
 
 import com.utgaming.testconcurrency.common.BusinessException;
 import com.utgaming.testconcurrency.common.CacheData;
+import com.utgaming.testconcurrency.common.StockDeductMessage;
 import com.utgaming.testconcurrency.controller.dto.ProductCreateRequest;
 import com.utgaming.testconcurrency.controller.dto.ProductUpdateRequest;
 import com.utgaming.testconcurrency.entity.Product;
@@ -12,20 +13,22 @@ import com.utgaming.testconcurrency.util.RedisUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Counter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.UUID;
+import java.util.concurrent.*;
 
-
+@Slf4j
 @Service
 public class ProductServiceImpl implements ProductService {
     private final ProductMapper productMapper;
@@ -36,16 +39,22 @@ public class ProductServiceImpl implements ProductService {
     private static final long TTL_SECONDS = 1800;
     private static final long TTL_JITTER_SECONDS = 300;
 
+    private final KafkaTemplate<String, StockDeductMessage> kafkaTemplate;
     private final StringRedisTemplate stringRedisTemplate;
     private final DefaultRedisScript<Long> deductStockScript;
     private final StockAsyncService stockAsyncService;
     @Value("${app.stock.async.enabled:false}") boolean asyncEnabled;
+    @Value("${app.stock.kafka.enabled:false}") boolean kafkaEnabled;
 
     private final Counter cacheHit;
     private final Counter cacheMiss;
     private final Counter deductSuccess;
     private final Counter deductFail;
     private final Counter dbWriteFail;
+    private final Counter asyncFail;
+    private final Counter asyncSuccess;
+    private final Counter asyncRetry;
+    private final Counter asyncRollback;
 
     public ProductServiceImpl(
             ProductMapper productMapper,
@@ -55,7 +64,8 @@ public class ProductServiceImpl implements ProductService {
             StringRedisTemplate stringRedisTemplate,
             DefaultRedisScript<Long> deductStockScript,
             StockAsyncService stockAsyncService,
-            MeterRegistry meterRegistry) {
+            MeterRegistry meterRegistry,
+            KafkaTemplate<String, StockDeductMessage> kafkaTemplate) {
         this.productMapper = productMapper;
         this.redisUtil = redisUtil;
         this.objectMapper = objectMapper;
@@ -68,6 +78,11 @@ public class ProductServiceImpl implements ProductService {
         this.deductSuccess = meterRegistry.counter("stock.deduct.success");
         this.deductFail = meterRegistry.counter("stock.deduct.fail");
         this.dbWriteFail = meterRegistry.counter("db.write.fail");
+        this.kafkaTemplate = kafkaTemplate;
+        this.asyncFail = meterRegistry.counter("stock.async.fail");
+        this.asyncSuccess = meterRegistry.counter("stock.async.success");
+        this.asyncRetry = meterRegistry.counter("stock.async.retry");
+        this.asyncRollback = meterRegistry.counter("stock.async.rollback");
     }
 
     /*延迟双删所需代码段*/
@@ -312,9 +327,38 @@ public class ProductServiceImpl implements ProductService {
             throw new BusinessException(409,"库存不足");
         }
 
-        if(asyncEnabled){
+/*        if(asyncEnabled){
             stockAsyncService.writeBackAsync(id,count);
-        }else{
+        }*/
+        if(kafkaEnabled){
+            String uuid = UUID.randomUUID().toString();
+
+            StockDeductMessage msg = new StockDeductMessage();
+
+            msg.setProductId(id);
+            msg.setCount(count);
+            msg.setTimestamp(LocalDateTime.now());
+            msg.setRequestId(uuid);
+
+            CompletableFuture<SendResult<String, StockDeductMessage>> result
+                    = kafkaTemplate.send("stock_deduct", msg.getRequestId(), msg);
+
+            result.whenComplete((res,ex) -> {
+                if(ex != null){
+                    asyncFail.increment();
+                    log.error("kafka传递失败,requestId={}, productId={}, count={}", msg.getRequestId(), id, count,ex);
+                    try {
+                        stringRedisTemplate.opsForValue().increment("stock:" + id, count);
+                    } catch (Exception e) {
+                        log.error("redis回滚失败,requestId={}, productId={}", msg.getRequestId(), id, ex);
+                    }
+                }else{
+
+                }
+            });
+
+        }
+        else{
 /*            int rows = productMapper.deductStock(id, count);
 
             if (rows != 1) {
@@ -363,4 +407,47 @@ public class ProductServiceImpl implements ProductService {
         return true;
     }
 
+    @KafkaListener(topics = "stock_deduct", groupId = "stock-writeback-group")
+    public void onMessage(StockDeductMessage message) {
+        String requestId = message.getRequestId();
+        Long productId = message.getProductId();
+        Integer count = message.getCount();
+
+        log.info("Kafka收到消息 requestId={}, productId={}, count={}", requestId, productId, count);
+
+        String key = "deduct:processed:" + requestId;
+        String existed = stringRedisTemplate.opsForValue().get(key);
+        if(existed != null) return;
+
+        Product p = productMapper.selectById(productId);
+
+        if(p == null){
+            asyncFail.increment();
+            log.warn("异步回写失败，未找到对应商品 id={}, count={}", productId, count);
+            throw new RuntimeException("未找到对应商品");
+        }
+
+        if(p.getStock() < count){
+            asyncFail.increment();
+            log.warn("异步回写失败，商品数量不足 id={}, count={}", productId, count);
+            throw new RuntimeException("商品数不足");
+        }
+
+        p.setStock(p.getStock()-count);
+        int rows = productMapper.updateById(p);
+        if(rows != 1){
+            log.warn("异步回写失败，回滚redis库存量,id={},count={}", productId, count);
+            asyncFail.increment();
+            throw new RuntimeException("回写失败");
+        }
+
+        if(rows == 1){
+            //asyncSuccess.increment();
+            log.info("异步回写成功 id={}, count={}", productId, count);
+            stringRedisTemplate.opsForValue()
+                    .setIfAbsent("deduct:processed:" + requestId, "1", 1, TimeUnit.DAYS);
+            asyncSuccess.increment();
+            return;
+        }
+    }
 }
