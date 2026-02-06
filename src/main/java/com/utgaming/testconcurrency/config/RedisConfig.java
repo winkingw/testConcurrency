@@ -27,7 +27,7 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 @Configuration
 public class RedisConfig {
 
-    @Value("${spring.data.redis.host}")
+/*    @Value("${spring.data.redis.host}")
     private String redisHost;
 
     @Value("${spring.data.redis.port}")
@@ -37,9 +37,9 @@ public class RedisConfig {
     private String redisPassword;
 
     @Value("${spring.data.redis.database:0}")
-    private int redisDatabase;
+    private int redisDatabase;*/
 
-    @Bean
+/*    @Bean
     public RedisConnectionFactory redisConnectionFactory() {
         RedisStandaloneConfiguration config = new RedisStandaloneConfiguration(redisHost, redisPort);
         config.setDatabase(redisDatabase);
@@ -47,7 +47,7 @@ public class RedisConfig {
             config.setPassword(redisPassword);
         }
         return new LettuceConnectionFactory(config);
-    }
+    }*/
 
     @SuppressWarnings("removal")
     @Bean

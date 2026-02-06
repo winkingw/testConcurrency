@@ -407,7 +407,7 @@ public class ProductServiceImpl implements ProductService {
         return true;
     }
 
-    @KafkaListener(topics = "stock_deduct", groupId = "stock-writeback-group")
+    @KafkaListener(topics = "stock_deduct", groupId = "stock-writeback-group",concurrency = "3")
     public void onMessage(StockDeductMessage message) {
         String requestId = message.getRequestId();
         Long productId = message.getProductId();

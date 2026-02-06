@@ -25,20 +25,50 @@ server:
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3307/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://mysql:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
     username: root
     password: 242859
+  shardingsphere:
+    database-name: testConcurrency
+    datasource:
+      names: master,slave
+      master:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: com.mysql.cj.jdbc.Driver
+        jdbc-url: jdbc:mysql://mysql:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&useInformationSchema=true&nullCatalogMeansCurrent=true
+        username: root
+        password: 242859
+      slave:
+        type: com.zaxxer.hikari.HikariDataSource
+        driver-class-name: com.mysql.cj.jdbc.Driver
+        jdbc-url: jdbc:mysql://mysql-slave:3306/testConcurrency?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&useInformationSchema=true&nullCatalogMeansCurrent=true
+        username: root
+        password: 242859
+    rules:
+      readwrite-splitting:
+        data-sources:
+          rw_ds:
+            type: Static
+            props:
+              write-data-source-name: master
+              read-data-source-names: slave
+    props:
+      sql-show: true
+      check-table-metadata-enabled: false
   data:
     # redis配置
     redis:
       # Redis数据库索引（默认为0）
       database: 1
-      # Redis服务器地址
-      host: 127.0.0.1
-      # Redis服务器连接端口
-      port: 6379
       # Redis服务器连接密码（默认为空）
       password: 242859
+
+      sentinel:
+        master: mymaster
+        nodes:
+          - 127.0.0.1:26379
+          - 127.0.0.1:26380
+          - 127.0.0.1:26381
       # 连接超时时间
       timeout: 10s
       lettuce:
@@ -56,6 +86,9 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        min.insync.replicas: 2
     consumer:
       group-id: stock-writeback-group
       auto-offset-reset: earliest
@@ -73,6 +106,8 @@ mybatis:
 
 
 app:
+  sharding:
+    enabled: false
   cache:
     enabled: true
   stock:
