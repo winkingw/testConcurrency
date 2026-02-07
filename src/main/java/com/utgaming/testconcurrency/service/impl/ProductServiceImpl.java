@@ -1,7 +1,7 @@
 package com.utgaming.testconcurrency.service.impl;
 
 import com.utgaming.testconcurrency.common.BusinessException;
-import com.utgaming.testconcurrency.common.CacheData;
+import com.utgaming.testconcurrency.entity.CacheData;
 import com.utgaming.testconcurrency.common.StockDeductMessage;
 import com.utgaming.testconcurrency.controller.dto.ProductCreateRequest;
 import com.utgaming.testconcurrency.controller.dto.ProductUpdateRequest;
