@@ -2,18 +2,18 @@ resilience4j:
   ratelimiter:
     instances:
       deductLimiter:
-        limitForPeriod: 200
+        limitForPeriod: 100
         limitRefreshPeriod: 1s
-        timeoutDuration: 0
+        timeoutDuration: 50ms
   circuitbreaker:
     instances:
       deductBreaker:
         slidingWindowType: COUNT_BASED
-        slidingWindowSize: 50
-        minimumNumberOfCalls: 20
-        failureRateThreshold: 10
-        waitDurationInOpenState: 10s
-        permittedNumberOfCallsInHalfOpenState: 5
+        slidingWindowSize: 100
+        minimumNumberOfCalls: 50
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 10
         recordExceptions:
           - java.lang.Exception
         ignoreExceptions:
