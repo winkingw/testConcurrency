@@ -7,8 +7,8 @@ import com.utgaming.testconcurrency.controller.dto.ProductCreateRequest;
 import com.utgaming.testconcurrency.controller.dto.ProductUpdateRequest;
 import com.utgaming.testconcurrency.entity.Product;
 import com.utgaming.testconcurrency.mapper.ProductMapper;
+import com.utgaming.testconcurrency.service.IdCheckStrategyFactory;
 import com.utgaming.testconcurrency.service.ProductService;
-import com.utgaming.testconcurrency.service.StockAsyncService;
 import com.utgaming.testconcurrency.util.RedisUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -35,6 +35,7 @@ public class ProductServiceImpl implements ProductService {
     private final RedisUtil redisUtil;
     private final ObjectMapper objectMapper;
     private final boolean cacheEnabled;
+    private final boolean idCheckEnabled;
 
     private static final long TTL_SECONDS = 1800;
     private static final long TTL_JITTER_SECONDS = 300;
@@ -42,7 +43,10 @@ public class ProductServiceImpl implements ProductService {
     private final KafkaTemplate<String, StockDeductMessage> kafkaTemplate;
     private final StringRedisTemplate stringRedisTemplate;
     private final DefaultRedisScript<Long> deductStockScript;
+    private final IdCheckStrategyFactory idCheckStrategyFactory;
     private final StockAsyncService stockAsyncService;
+
+
     @Value("${app.stock.async.enabled:false}") boolean asyncEnabled;
     @Value("${app.stock.kafka.enabled:false}") boolean kafkaEnabled;
 
@@ -65,7 +69,9 @@ public class ProductServiceImpl implements ProductService {
             DefaultRedisScript<Long> deductStockScript,
             StockAsyncService stockAsyncService,
             MeterRegistry meterRegistry,
-            KafkaTemplate<String, StockDeductMessage> kafkaTemplate) {
+            KafkaTemplate<String, StockDeductMessage> kafkaTemplate,
+            @Value("${app.idcheck.enable:true}") boolean idCheckEnabled,
+            IdCheckStrategyFactory idCheckStrategyFactory) {
         this.productMapper = productMapper;
         this.redisUtil = redisUtil;
         this.objectMapper = objectMapper;
@@ -83,6 +89,8 @@ public class ProductServiceImpl implements ProductService {
         this.asyncSuccess = meterRegistry.counter("stock.async.success");
         this.asyncRetry = meterRegistry.counter("stock.async.retry");
         this.asyncRollback = meterRegistry.counter("stock.async.rollback");
+        this.idCheckEnabled = idCheckEnabled;
+        this.idCheckStrategyFactory = idCheckStrategyFactory;
     }
 
     /*延迟双删所需代码段*/
@@ -99,6 +107,11 @@ public class ProductServiceImpl implements ProductService {
     @Override
     @Transactional(readOnly = true)
     public Product getProductById(Long id) {
+        if(idCheckEnabled) {
+            boolean bloomOk = idCheckStrategyFactory.getStrategy().exists(id);
+            if(!bloomOk) return null;
+        }
+
         String key = "product:" + id;
 
         if (!cacheEnabled) {
@@ -245,6 +258,10 @@ public class ProductServiceImpl implements ProductService {
             String key = "product:" + product.getId();
             redisUtil.del(key);
             delayDelete(key);
+        }
+
+        if(idCheckEnabled) {
+            idCheckStrategyFactory.getStrategy().add(product.getId());
         }
 
         stringRedisTemplate.opsForValue()

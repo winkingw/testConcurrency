@@ -1,4 +1,14 @@
 services:
+  nginx:
+    image: nginx:1.27
+    ports:
+      - "90:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - default
   kafka1:
     image: apache/kafka:3.7.2
     ports:
@@ -108,8 +118,8 @@ services:
     restart: unless-stopped
   app:
     build: .
-    ports:
-      - "90:90"
+    # ports:
+    #   - "90:90"
     environment:
       SPRING_PROFILES_ACTIVE: "prod"
       SPRING_DATA_REDIS_PASSWORD: "242859"

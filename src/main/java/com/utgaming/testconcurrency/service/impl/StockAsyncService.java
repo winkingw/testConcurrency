@@ -1,4 +1,4 @@
-package com.utgaming.testconcurrency.service;
+package com.utgaming.testconcurrency.service.impl;
 
 import com.utgaming.testconcurrency.entity.Product;
 import com.utgaming.testconcurrency.mapper.ProductMapper;

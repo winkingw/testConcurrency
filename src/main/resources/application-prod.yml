@@ -88,6 +88,13 @@ app:
       enabled: false
     kafka:
       enabled: true
+  idcheck:
+    enable: true
+    strategy: bloom
+    bloom:
+      key: product:bloom
+      size: 1000000
+      fpp: 0.01
 management:
   endpoints:
     web:
